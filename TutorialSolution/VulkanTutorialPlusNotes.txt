@@ -1,0 +1,19 @@
+Notes for Vulkan
+----------------
+
+Vulkan SDK is the Vulkan development suite.
+GLFW allows communication to a window (etc.) on Windows platform.
+GLM is a header only library for linear algebra used in graphics programming.
+
+SDK install location (wow 1.1GB!):
+
+F:\VulkanSDK\1.2.182.0
+
+GLFW install location:
+
+F:\GLFW\glfw-3.3.4.bin.WIN64
+
+GLM install location:
+
+F:\GLM\glm
+

@@ -7,11 +7,12 @@
 #include <cstdlib>
 #include <vector>
 
-// This branch looks for a graphical card (a physical device) and see if it supports
-// a graphics queue family.  The entry point is added in initVulkan's last call to 
-// pickPhysicalDevice().  Note that many types of queues exist each with a specialized 
-// purposed.  All are for communicating to the physical device and can be such things 
-// as drawing queues, texture queues, compute queues, etc.
+// After selecting a physical device to use we need to set up a logical device 
+// to interface with it.The logical device creation process is similar to the 
+// instance creation processand describes the features we want to use.  We also 
+// need to specify which queues to create now that we've queried which queue 
+// families are available. You can even create multiple logical devices from 
+// the same physical device if you have varying requirements.
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -85,6 +86,9 @@ private:
 	VkDebugUtilsMessengerEXT debugMessenger; // Handle to the debug messenger callback (even this needs a handle, like all things in Vulkan)
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE; // Holds the handle to the graphics card we're using.  Instance destruction automatically 
 	                                                  // releases this handle.  No explicit destroy call is needed.
+	VkDevice device;  // Handle to the logical device.
+	VkQueue graphicsQueue; // Handle to the queue created with the logical device above.  It is created automatically when the logical device is
+						   // is created.  It must be retrieved via VkGetDeviceQueue(...);
 
 	void initWindow() {
 		glfwInit();
@@ -98,6 +102,51 @@ private:
 		createInstance();
 		setupDebugMessenger();   // Call to setup debug callbacks.
 		pickPhysicalDevice();
+		createLogicalDevice();
+	}
+
+	void createLogicalDevice() {
+		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+
+		VkDeviceQueueCreateInfo queueCreateInfo{};
+		queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+		queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.value();
+		queueCreateInfo.queueCount = 1;  // Need only 1 queue... current driver state only supports low number queues.
+
+		// Can specify a priority to queues from 0.0 to 1.0.  Setting a priority, even if only one queue, is required.
+		float queuePriority = 1.0f;
+		queueCreateInfo.pQueuePriorities = &queuePriority;
+
+		// Specify device features we want.  Currently, we want nothing but will be updating in later sections.
+		VkPhysicalDeviceFeatures deviceFeatures{};
+
+		// Fill in main logical device structure with information supplied so far.
+		VkDeviceCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+		createInfo.pQueueCreateInfos = &queueCreateInfo;
+		createInfo.queueCreateInfoCount = 1;
+
+		createInfo.pEnabledFeatures = &deviceFeatures;
+		createInfo.enabledExtensionCount = 0;
+
+		if (enableValidationLayers) { 
+			// Below two fields are no longer used in newer Vulkan releases.  However, they are set here in 
+			// case an older version of Vulkan is used.
+			createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+			createInfo.ppEnabledLayerNames = validationLayers.data();
+		}
+		else {
+			createInfo.enabledLayerCount = 0;
+		}
+
+		// Create the logical device....
+		if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create logical device!");
+		}
+
+		// Retrieve the queue created with this device.
+		// parameters = logical device, queue family, queue index, and pointer to store the queue handle.
+		vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
 	}
 
 	void pickPhysicalDevice() {
@@ -390,6 +439,8 @@ private:
 	}
 
 	void cleanup() {
+		// Logical devices must be cleaned up.
+		vkDestroyDevice(device, nullptr);  
 
 		// Must return resources set aside for the debug messenger.
 		if (enableValidationLayers) {

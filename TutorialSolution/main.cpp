@@ -6,13 +6,72 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <vector>
+#include <set> 
 
-// After selecting a physical device to use we need to set up a logical device 
-// to interface with it.The logical device creation process is similar to the 
-// instance creation processand describes the features we want to use.  We also 
-// need to specify which queues to create now that we've queried which queue 
-// families are available. You can even create multiple logical devices from 
-// the same physical device if you have varying requirements.
+// Since Vulkan is a platform agnostic API, it can not interface directly with 
+// the window system on its own.To establish the connection between Vulkan and 
+// the window system to present results to the screen, we need to use the WSI 
+// (Window System Integration) extensions.  In this chapter we'll discuss the 
+// first one, which is VK_KHR_surface. It exposes a VkSurfaceKHR object that 
+// represents an abstract type of surface to present rendered images to.  The 
+// surface in our program will be backed by the window that we've already 
+// opened with GLFW.
+
+// The VK_KHR_surface extension is an instance level extension and we've 
+// actually already enabled it, because it's included in the list returned by 
+// glfwGetRequiredInstanceExtensions.  The list also includes some other WSI 
+// extensions that we'll use in the next couple of chapters.
+
+// The window surface needs to be created right after the instance creation, 
+// because it can actually influence the physical device selection.  The 
+// reason we postponed this is because window surfaces are part of the larger 
+// topic of render targets and presentation for which the explanation would have 
+// cluttered the basic setup.  It should also be noted that window surfaces are 
+// an entirely optional component in Vulkan, if you just need off - screen 
+// rendering.  Vulkan allows you to do that without hacks like creating an 
+// invisible window (necessary for OpenGL).
+//
+// The GLFW extension hides the details of the platform call to generate a 
+// surface.  However, the specific platform calls can be made directly as 
+// show below for edification:
+//
+// Update includes to:
+//
+// #define VK_USE_PLATFORM_WIN32_KHR
+// #define GLFW_INCLUDE_VULKAN
+// #include <GLFW/glfw3.h>
+// #define GLFW_EXPOSE_NATIVE_WIN32
+// #include <GLFW/glfw3native.h>
+//
+// Fill in createInfo for a WIN32 surface creation with Windows handles and
+// instances (HWND and HINSTANCE are Windows platform specific):
+//
+// VkWin32SurfaceCreateInfoKHR createInfo{};
+// createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+// createInfo.hwnd = glfwGetWin32Window(window);  // Get raw Windows handle HWND.
+// createInfo.hinstance = GetModuleHandle(nullptr);  // Get HINSTANCE of current process.
+//
+// Create native surface will call to:
+//
+// if (vkCreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
+//    throw std::runtime_error("failed to create window surface!");
+// }
+//
+// All of the above is replaced with the GLFW library function, glfwCreateWindowSurface(...)
+//
+// Regarding presentation support from the tutorial text:
+//
+// Although the Vulkan implementation may support window system integration, that 
+// does not mean that every device in the system supports it. Therefore we need to 
+// extend isDeviceSuitable to ensure that a device can present images to the 
+// surface we created. Since the presentation is a queue-specific feature, the 
+// problem is actually about finding a queue family that supports presenting to 
+// the surface we created.
+//
+// It's actually possible that the queue families supporting drawing commands and 
+// the ones supporting presentation do not overlap. Therefore we have to take into 
+// account that there could be a distinct presentation queue by modifying the 
+// QueueFamilyIndices structure:
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -64,9 +123,10 @@ struct QueueFamilyIndices {
 	// to assign to it to indicate that it is invalid.  The optional wrapper has the method has_value()
 	// to indicate if a value has been assigned to it.
 	std::optional<uint32_t> graphicsFamily;
+	std::optional<uint32_t> presentFamily;
 
 	bool isComplete() {
-		return graphicsFamily.has_value();
+		return graphicsFamily.has_value() && presentFamily.has_value();
 	}
 };
 
@@ -84,11 +144,15 @@ private:
 	GLFWwindow* window;                      // Window generated for Vulkan usage
 	VkInstance instance;                     // Vulkan handle to instance
 	VkDebugUtilsMessengerEXT debugMessenger; // Handle to the debug messenger callback (even this needs a handle, like all things in Vulkan)
+	VkSurfaceKHR surface;                    // Abstraction of presentation surface used to draw images.  Basically, this is a way to communicate
+	                                         // to the underlying graphics system in the OS.  It's usage is platform agnostic, but its creation
+	                                         // is platform specific.
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE; // Holds the handle to the graphics card we're using.  Instance destruction automatically 
 	                                                  // releases this handle.  No explicit destroy call is needed.
 	VkDevice device;  // Handle to the logical device.
 	VkQueue graphicsQueue; // Handle to the queue created with the logical device above.  It is created automatically when the logical device is
 						   // is created.  It must be retrieved via VkGetDeviceQueue(...);
+	VkQueue presentQueue; // Handle to the presentation queue.
 
 	void initWindow() {
 		glfwInit();
@@ -101,21 +165,38 @@ private:
 	void initVulkan() {
 		createInstance();
 		setupDebugMessenger();   // Call to setup debug callbacks.
+		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
+	}
+
+	void createSurface() {
+		// Super easy call to create surface.  No structures needed.
+		// Parameters are VkInstance created earlier, the window pointer created earlier by GLFW, 
+		// custom allocators, and pointer to assigned surface handle.
+		if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create window surface!");
+		}
 	}
 
 	void createLogicalDevice() {
 		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
-		VkDeviceQueueCreateInfo queueCreateInfo{};
-		queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-		queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.value();
-		queueCreateInfo.queueCount = 1;  // Need only 1 queue... current driver state only supports low number queues.
+		// Since we need more than one queue, use a set to store multiple queues.
+
+		std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+		std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
 		// Can specify a priority to queues from 0.0 to 1.0.  Setting a priority, even if only one queue, is required.
 		float queuePriority = 1.0f;
-		queueCreateInfo.pQueuePriorities = &queuePriority;
+		for (uint32_t queueFamily : uniqueQueueFamilies) {
+			VkDeviceQueueCreateInfo queueCreateInfo{};
+			queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+			queueCreateInfo.queueFamilyIndex = queueFamily;
+			queueCreateInfo.queueCount = 1;  // Need only 1 queue... current driver state only supports low number queues.
+			queueCreateInfo.pQueuePriorities = &queuePriority;
+			queueCreateInfos.push_back(queueCreateInfo);
+		}
 
 		// Specify device features we want.  Currently, we want nothing but will be updating in later sections.
 		VkPhysicalDeviceFeatures deviceFeatures{};
@@ -123,8 +204,8 @@ private:
 		// Fill in main logical device structure with information supplied so far.
 		VkDeviceCreateInfo createInfo{};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.queueCreateInfoCount = 1;
+		createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+		createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
 		createInfo.pEnabledFeatures = &deviceFeatures;
 		createInfo.enabledExtensionCount = 0;
@@ -147,6 +228,7 @@ private:
 		// Retrieve the queue created with this device.
 		// parameters = logical device, queue family, queue index, and pointer to store the queue handle.
 		vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
+		vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
 	}
 
 	void pickPhysicalDevice() {
@@ -188,11 +270,21 @@ private:
 
 		// For now we need a queue that supports graphics.  QueueFamily properties also can return
 		// the number of queues supported among other information.
+		//
+		// Now checking for presentation support.  Generally, if one card supports both, that card
+		// should be preferred than having two different cards for each queue.  One card running
+		// the entire graphics program is more efficient.  However, it is possible to run different
+		// queues to different cards.
 
 		int i = 0;
 		for (const auto& queueFamily : queueFamilies) {
 			if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
 				indices.graphicsFamily = i;
+			}
+			VkBool32 presentSupport = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+			if (presentSupport) {
+				indices.presentFamily = i;
 			}
 			if (indices.isComplete()) {
 				break;
@@ -447,6 +539,7 @@ private:
 			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 		}
 
+		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 
 		glfwDestroyWindow(window);

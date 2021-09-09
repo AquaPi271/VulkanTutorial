@@ -1,24 +1,17 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include <optional>
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 #include <vector>
 
-// Validation layers are not necessary in the final Vulkan graphics application.
-// However, they are indispensible when trying to debug the Vulkan API calls.  
-// Most Vulkan calls have little to no debug information.  Even simple mistakes 
-// such as missing proper enumerations or setting a parameter wrong will often 
-// lead to failures.  A validation layer is provided with an external interface
-// to Vulkan.  This layer can provide feedback about why certain calls may fail
-// or perform less than optimally.  A message callback mechanism can be setup
-// and used from the program.  These messages can give detailed information about
-// errors, warnings, information, and recommendations.  The validation layers may
-// be included conditionally with builds.  In the typical setup, the debug build
-// includes the validation layers, while the release build does not. 
-//
-// This branch of git corresponds to the validation layer tutorial.
+// This branch looks for a graphical card (a physical device) and see if it supports
+// a graphics queue family.  The entry point is added in initVulkan's last call to 
+// pickPhysicalDevice().  Note that many types of queues exist each with a specialized 
+// purposed.  All are for communicating to the physical device and can be such things 
+// as drawing queues, texture queues, compute queues, etc.
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -63,6 +56,19 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
 	}
 }
 
+// Bundle different types of queues into a struct to lookup later.
+struct QueueFamilyIndices {
+	// std::optional is a new C++17 feature that allows a variable to be used yet not hold a value.
+	// Since any uint32_t value could technically be a valid graphicsFamily, there's no safe value
+	// to assign to it to indicate that it is invalid.  The optional wrapper has the method has_value()
+	// to indicate if a value has been assigned to it.
+	std::optional<uint32_t> graphicsFamily;
+
+	bool isComplete() {
+		return graphicsFamily.has_value();
+	}
+};
+
 class HelloTriangleApplication {
 public:
 	void run() {
@@ -77,6 +83,8 @@ private:
 	GLFWwindow* window;                      // Window generated for Vulkan usage
 	VkInstance instance;                     // Vulkan handle to instance
 	VkDebugUtilsMessengerEXT debugMessenger; // Handle to the debug messenger callback (even this needs a handle, like all things in Vulkan)
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE; // Holds the handle to the graphics card we're using.  Instance destruction automatically 
+	                                                  // releases this handle.  No explicit destroy call is needed.
 
 	void initWindow() {
 		glfwInit();
@@ -89,6 +97,61 @@ private:
 	void initVulkan() {
 		createInstance();
 		setupDebugMessenger();   // Call to setup debug callbacks.
+		pickPhysicalDevice();
+	}
+
+	void pickPhysicalDevice() {
+		uint32_t deviceCount = 0;
+		vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);  // typical query call to find number of devices 
+		
+		if (deviceCount == 0) {
+			throw std::runtime_error("failed to find GPUs with Vulkan support");
+		}
+
+		std::vector<VkPhysicalDevice> devices(deviceCount);
+		vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data()); // get handles to all physical devices
+
+		for (const auto& device : devices) {
+			if (isDeviceSuitable(device)) {
+				physicalDevice = device;
+				break;
+			}
+		}
+
+		if (physicalDevice == VK_NULL_HANDLE) {
+			throw std::runtime_error("failed to find a suitable GPU!");
+		}
+	}
+
+	bool isDeviceSuitable(VkPhysicalDevice device) {
+		QueueFamilyIndices indices = findQueueFamilies(device);
+		return indices.isComplete();
+	}
+
+	QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
+		QueueFamilyIndices indices;
+		// Logic to find graphics queue family
+		uint32_t queueFamilyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+
+		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+		// For now we need a queue that supports graphics.  QueueFamily properties also can return
+		// the number of queues supported among other information.
+
+		int i = 0;
+		for (const auto& queueFamily : queueFamilies) {
+			if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+				indices.graphicsFamily = i;
+			}
+			if (indices.isComplete()) {
+				break;
+			}
+			i++;
+		}
+
+		return indices;
 	}
 
 	// The normal debug messenger needs an instance to receive information about Vulkan.  However, it does not

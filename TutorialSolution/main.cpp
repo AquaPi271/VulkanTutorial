@@ -10,53 +10,17 @@
 #include <cstdint> // Necessary for UINT32_MAX
 #include <algorithm> // Necessary for std::min/std::max
 
-// Vulkan does not have the concept of a "default framebuffer", hence it 
-// requires an infrastructure that will own the buffers we will render to 
-// before we visualize them on the screen.  This infrastructure is known as the 
-// swap chain and must be created explicitly in Vulkan.  The swap chain is 
-// essentially a queue of images that are waiting to be presented to the 
-// screen.  Our application will acquire such an image to draw to it, and then 
-// return it to the queue.  How exactly the queue works and the conditions for 
-// presenting an image from the queue depend on how the swap chain is set up, 
-// but the general purpose of the swap chain is to synchronize the presentation 
-// of images with the refresh rate of the screen.
+// Image views
 //
-// The code must not only see if a swap chain is available but also see if it is
-// compatible with the window surface.  Need to check:
-//   1) Basic surface capabilities (min/max number of images in swap chain, 
-//      min/max width and height of images).
-//   2) Surface formats (pixel format, color space)
-//   3) Available presentation modes.
-// 
-// Choose right settings for the swap chain:
-//   1) Surface format (color depth)
-//   2) Presentation mode (conditions for "swapping" images to the screen)
-//   3) Swap extent (resolution of images in swap chain)
+// To use any VkImage, including those in the swap chain, in the render 
+// pipeline we have to create a VkImageView object.  An image view is quite 
+// literally a view into an image.  It describes how to access the image and 
+// which part of the image to access, for example if it should be treated as a 
+// 2D texture depth texture without any mipmapping levels.
 //
-// Presentation Mode:
-// There are 4 possible modes in Vulkan:
-// VK_PRESENT_MODE_IMMEDIATE_KHR: Images submitted by your application are 
-// transferred to the screen right away, which may result in tearing.
-// VK_PRESENT_MODE_FIFO_KHR: The swap chain is a queue where the display takes 
-// an image from the front of the queue when the display is refreshed and the 
-// program inserts rendered images at the back of the queue.  If the queue is 
-// full then the program has to wait.  This is most similar to vertical sync 
-// as found in modern games.  The moment that the display is refreshed is 
-// known as "vertical blank". (This is the only mode that is guaranteed to be
-// supported).
-// VK_PRESENT_MODE_FIFO_RELAXED_KHR : This mode only differs from the previous 
-// one if the application is late and the queue was empty at the last vertical 
-// blank.  Instead of waiting for the next vertical blank, the image is 
-// transferred right away when it finally arrives.  This may result in visible 
-// tearing.
-// VK_PRESENT_MODE_MAILBOX_KHR : This is another variation of the second mode.
-// Instead of blocking the application when the queue is full, the images that 
-// are already queued are simply replaced with the newer ones.  This mode can 
-// be used to render frames as fast as possible while still avoiding tearing, 
-// resulting in fewer latency issues than standard vertical sync.  This is 
-// commonly known as "triple buffering", although the existence of three 
-// buffers alone does not necessarily mean that the framerate is unlocked.
-// 
+// In this chapter we'll write a createImageViews function that creates a basic 
+// image view for every image in the swap chain so that we can use them as 
+// color targets later on.
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -157,6 +121,7 @@ private:
 	// The images are created when the swap chain is created and therefore are deleted when the swap chain is deleted.
 	VkFormat swapChainImageFormat; // Store image formats for future use.
 	VkExtent2D swapChainExtent;    // Store dimensions of swap chain for future use.
+	std::vector<VkImageView> swapChainImageViews;
 
 	void initWindow() {
 		glfwInit();
@@ -173,6 +138,38 @@ private:
 		pickPhysicalDevice();
 		createLogicalDevice();
 		createSwapChain();
+		createImageViews();
+	}
+
+	void createImageViews() {
+		swapChainImageViews.resize(swapChainImages.size());
+		for (size_t i = 0; i < swapChainImages.size(); i++) {
+			VkImageViewCreateInfo createInfo{};
+			createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			createInfo.image = swapChainImages[i];
+			createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;  // can be 1D, 2D, 3D textures or cube maps
+			createInfo.format = swapChainImageFormat;
+			
+			// Colors channels can be mapped to different values.
+			// Below is the default mapping.
+			createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+			createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+			createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+			createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+			// Subresource range tells the image's purpose and what part of it
+			// should be accessed.  Here we're creating color targets without
+			// any mipmapping or multiple layers.
+			createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			createInfo.subresourceRange.baseMipLevel = 0;
+			createInfo.subresourceRange.levelCount = 1;
+			createInfo.subresourceRange.baseArrayLayer = 0;
+			createInfo.subresourceRange.layerCount = 1;  // This might be different for stereoscopic 3D images.
+
+			if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+				throw std::runtime_error("failed to create image views!");
+			}
+		}
 	}
 
 	void createSwapChain() {
@@ -706,6 +703,11 @@ private:
 	}
 
 	void cleanup() {
+		// Clean up the image views that were created for us.
+		for (auto imageView : swapChainImageViews) {
+			vkDestroyImageView(device, imageView, nullptr);
+		}
+
 		// Clean the swap chain.
 		vkDestroySwapchainKHR(device, swapChain, nullptr);
 

@@ -16,6 +16,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\VulkanTest\PropertySheet.props" />
+    <None Include="tutorial_fragment_shader.frag" />
+    <None Include="tutorial_vertex_shader.vert" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="..\..\..\VulkanTest\VulkanTutorialPlusNotes.txt" />

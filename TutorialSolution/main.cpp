@@ -9,8 +9,73 @@
 #include <set> 
 #include <cstdint> // Necessary for UINT32_MAX
 #include <algorithm> // Necessary for std::min/std::max
+#include <fstream>
 
-// Graphics Pipeline
+// Shader Modules
+//
+// Unlike earlier APIs, shader code in Vulkan has to be specified in a 
+// bytecode format as opposed to human-readable syntax like GLSL and HLSL. 
+// This bytecode format is called SPIR-V and is designed to be used with 
+// both Vulkan and OpenCL (both Khronos APIs). It is a format that can be 
+// used to write graphics and compute shaders, but we will focus on shaders 
+// used in Vulkan's graphics pipelines in this tutorial.
+//
+// The advantage of using a bytecode format is that the compilers written by
+// GPU vendors to turn shader code into native code are significantly less 
+// complex.  The past has shown that with human - readable syntax like GLSL, 
+// some GPU vendors were rather flexible with their interpretation of the 
+// standard.  If you happen to write non - trivial shaders with a GPU from one
+// of these vendors, then you'd risk other vendor's drivers rejecting your code
+// due to syntax errors, or worse, your shader running differently because of 
+// compiler bugs.  With a straightforward bytecode format like SPIR - V that 
+// will hopefully be avoided.
+//
+// However, that does not mean that we need to write this bytecode by hand.
+// Khronos has released their own vendor - independent compiler that compiles 
+// GLSL to SPIR - V.  This compiler is designed to verify that your shader code 
+// is fully standards compliant and produces one SPIR - V binary that you can 
+// ship with your program. You can also include this compiler as a library to 
+// produce SPIR - V at runtime, but we won't be doing that in this tutorial. 
+// Although we can use this compiler directly via glslangValidator.exe, we will 
+// be using glslc.exe by Google instead. The advantage of glslc is that it uses 
+// the same parameter format as well-known compilers like GCC and Clang and 
+// includes some extra functionality like includes. Both of them are already 
+// included in the Vulkan SDK, so you don't need to download anything extra.
+//
+// GLSL is a shading language with a C - style syntax. Programs written in it 
+// have a main function that is invoked for every object.  Instead of using 
+// parameters for input and a return value as output, GLSL uses global variables 
+// to handle input and output.  The language includes many features to aid in 
+// graphics programming, like built - in vector and matrix primitives.  
+// Functions for operations like cross products, matrix - vector products and 
+// reflections around a vector are included.  The vector type is called vec 
+// with a number indicating the amount of elements. For example, a 3D position 
+// would be stored in a vec3.  It is possible to access single components 
+// through members like.x, but it's also possible to create a new vector from 
+// multiple components at the same time. For example, the expression 
+// vec3(1.0, 2.0, 3.0).xy would result in vec2. The constructors of vectors can 
+// also take combinations of vector objects and scalar values. For example, a 
+// vec3 can be constructed with vec3(vec2(1.0, 2.0), 3.0).
+//
+// As the previous chapter mentioned, we need to write a vertex shader and a 
+// fragment shader to get a triangle on the screen.The next two sections will 
+// cover the GLSL code of each of those and after that I'll show you how to 
+// produce two SPIR-V binaries and load them into the program.
+
+
+// Vertex Shader
+//
+// Graphics are normalized from framebuffer coordinates to normalized device 
+// coordinates:
+// 
+// Center of image is (0,0) and then +1,-1 for the corners: 
+//   UL = (-1,-1)
+//   UR = (1,-1)
+//   LL = (-1,1)
+//   LR = (1,1)
+// In 3D the range is from 0 to 1 (like Direct3D).
+
+// Graphics Pipeline (keeping for reference)
 //
 // Barely anything touched here.  This step is more about information.
 // The full pipe line runs sequentially through the following stages:
@@ -149,7 +214,59 @@ private:
 	}
 
 	void createGraphicsPipeline() {
+		auto vertShaderCode = readFile("vert.spv");
+		auto fragShaderCode = readFile("frag.spv");
 
+		// The modules are just a thin wrapper around the bytecode.
+
+		VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+		VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+		// Create shader stages for these modules.
+
+		VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+		vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;  // Assign this step to vertex shader.
+		vertShaderStageInfo.module = vertShaderModule;
+		vertShaderStageInfo.pName = "main";  
+		// Can combine multiple fragment shaders into a single shader module and use different entry 
+		// points to select behavior.  Here, "main" is the entry point.
+		// pSpecializationInfo -- optional member to specify values for shader constants.  So this
+		// can be done to optimize the shader module by select paths before runtime to optimize 
+		// against, if the variable controls shader 'if' statements, for example.
+
+		VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+		fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+		fragShaderStageInfo.module = fragShaderModule;
+		fragShaderStageInfo.pName = "main";
+
+		// Store these for future reference.
+
+		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+		// Compilation and linking of GPU machine code  until graphics pipeline is
+		// created.  Since we already created it, the modules are no longer needed
+		// and can be destroyed.
+
+		vkDestroyShaderModule(device, fragShaderModule, nullptr);
+		vkDestroyShaderModule(device, vertShaderModule, nullptr);
+	}
+	
+	// Wrap byte-code into a shader module to be used in the pipeline.
+
+	VkShaderModule createShaderModule(const std::vector<char>& code) {
+		VkShaderModuleCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfo.codeSize = code.size();
+		createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+		VkShaderModule shaderModule;
+		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create shader module!");
+		}
+
+		return shaderModule;
 	}
 
 	void createImageViews() {
@@ -695,7 +812,6 @@ private:
 	// The callback returns true or false Boolean and indicates if the program should abort.
 	// A true value indicates a fatal, abort error.
 
-
 	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 		VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
 		VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -705,6 +821,29 @@ private:
 		std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
 
 		return VK_FALSE;
+	}
+
+	// Helper function to load a shader.
+
+	static std::vector<char> readFile(const std::string& filename) {
+		// The ate option starts reading from the end of the file.
+		// It allows us to know how to allocate a byte vector for it.
+		// The input shader is bytecode and therefore is binary.
+		std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+		if (!file.is_open()) {
+			throw std::runtime_error("failed to open file!");
+		}
+
+		size_t fileSize = (size_t)file.tellg();
+		std::vector<char> buffer(fileSize);
+
+		file.seekg(0);
+		file.read(buffer.data(), fileSize);
+
+		file.close();
+
+		return buffer;
 	}
 
 	void mainLoop() {

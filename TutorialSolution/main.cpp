@@ -10,17 +10,23 @@
 #include <cstdint> // Necessary for UINT32_MAX
 #include <algorithm> // Necessary for std::min/std::max
 
-// Image views
+// Graphics Pipeline
 //
-// To use any VkImage, including those in the swap chain, in the render 
-// pipeline we have to create a VkImageView object.  An image view is quite 
-// literally a view into an image.  It describes how to access the image and 
-// which part of the image to access, for example if it should be treated as a 
-// 2D texture depth texture without any mipmapping levels.
+// Barely anything touched here.  This step is more about information.
+// The full pipe line runs sequentially through the following stages:
+// 
+// 1)  Vertex / Index Buffer data feeds ->
+// 2)  Input Assembler Stage* 
+// 3)  Vertex Shader
+// 4)  Tessellation
+// 5)  Geometry Shader
+// 6)  Rasterization*
+// 7)  Fragment Shader
+// 8)  Color Blending*
+// 9)  Framebuffer
 //
-// In this chapter we'll write a createImageViews function that creates a basic 
-// image view for every image in the swap chain so that we can use them as 
-// color targets later on.
+// Stages with stars (*) can only modify parameters into the stage.
+// Other stages are fully programmable.
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -139,6 +145,11 @@ private:
 		createLogicalDevice();
 		createSwapChain();
 		createImageViews();
+		createGraphicsPipeline();
+	}
+
+	void createGraphicsPipeline() {
+
 	}
 
 	void createImageViews() {

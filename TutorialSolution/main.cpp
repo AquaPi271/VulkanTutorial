@@ -168,6 +168,9 @@ private:
 	// directed with the complete sequence of commands.  Several may be used especially in a threaded environment.
 	VkCommandBuffer commandBuffer{}; // Actual single buffer use to issue commands.  Added to commandPool.
 	VkPipeline graphicsPipeline{}; // Full-blown pipeline is here.
+	VkSemaphore imageAvailableSemaphore;
+	VkSemaphore renderFinishedSemaphore;
+	VkFence inFlightFence;
 
 	void initWindow() {
 		glfwInit();
@@ -191,6 +194,26 @@ private:
 		createFrameBuffers();
 		createCommandPool();
 		createCommandBuffer();  // Allocate the command buffer.
+		createSyncObjects();
+	}
+
+	// Swap chain GPU synchronization and fence to for image frame to finish.
+	void createSyncObjects() {
+		VkSemaphoreCreateInfo semaphoreInfo{};
+		semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+		VkFenceCreateInfo fenceInfo{};
+		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		// Fences wait for a frame to be drawn.  However, on the first frame there are no previous frames.
+		// Therefore the wait fence will wait indefinitely.  To fix this issue, a fence can be created with
+		// the signal already set.  That's what the 'flags' field does above.
+
+		if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
+			vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
+			vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create semaphores!");
+		}
 	}
 
 	// This will be called to write commands to the commandBuffer.
@@ -360,6 +383,30 @@ private:
 		// -- pDepthStencilAttachment : Attachment for depth and stencil data
 		// -- pPreserveAttachments : Attachments that are not used by this subpass, but for which the data must be preserved
 
+		// Subpass dependencies
+		// --------------------
+		// Remember that the subpasses in a render pass automatically take care of image layout transitions. These 
+		// transitions are controlled by subpass dependencies, which specify memory and execution dependencies between 
+		// subpasses.We have only a single subpass right now, but the operations right before and right after this 
+		// subpass also count as implicit "subpasses".
+		//
+		// There are two built - in dependencies that take care of the transition at the start of the render pass and 
+		// at the end of the render pass, but the former does not occur at the right time. It assumes that the 
+		// transition occurs at the start of the pipeline, but we haven't acquired the image yet at that point! There 
+		// are two ways to deal with this problem. We could change the waitStages for the imageAvailableSemaphore to 
+		// VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT to ensure that the render passes don't begin until the image is 
+		// available, or we can make the render pass wait for the VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT stage.
+		// I've decided to go with the second option here, because it's a good excuse to have a look at subpass 
+		// dependencies and how they work.
+
+		VkSubpassDependency dependency{};
+		dependency.srcSubpass = VK_SUBPASS_EXTERNAL;  // Refers to implicit subpass before or after rendering pass.
+		dependency.dstSubpass = 0;  // Refers to actual subpass.
+		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependency.srcAccessMask = 0;
+		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
 		// Finally create the render pass.
 		VkRenderPassCreateInfo renderPassInfo{};
 		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -367,6 +414,8 @@ private:
 		renderPassInfo.pAttachments = &colorAttachment;
 		renderPassInfo.subpassCount = 1;
 		renderPassInfo.pSubpasses = &subpass;
+		renderPassInfo.dependencyCount = 1;
+		renderPassInfo.pDependencies = &dependency;
 
 		if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create render pass!");
@@ -1255,10 +1304,109 @@ private:
 	void mainLoop() {
 		while (!glfwWindowShouldClose(window)) {
 			glfwPollEvents();
+			drawFrame();
 		}
+
+		// Do not close device while it is in use otherwise it will crash ungracefully.
+		vkDeviceWaitIdle(device);
+	}
+
+	void drawFrame() {
+		// At a high level, rendering a frame in Vulkan consists of a common set of steps :
+		//
+		// -- Wait for the previous frame to finish
+		// -- Acquire an image from the swap chain
+		// -- Record a command buffer which draws the scene onto that image
+		// -- Submit the recorded command buffer
+		// -- Present the swap chain image
+		
+		// Semaphores (orders events on the GPU)
+		// ----------
+		// Events sent to the GPU are generally asynchronous.  Whenever a synchronization needs to happen,
+		// it must be explicitly stated.  To ensure one event finishes to a certain point before another can
+		// begin, semaphores are used.  The first event sends a 'signal' on its semaphore.  The receiving event
+		// does a 'wait' for this signal before it can start.
+		// Vulkan has binary and timeline semaphores.  For the tutorial only binary are used (aka, signal/wait).
+
+		// Fences (orders events on the CPU)
+		// ------
+	    // A fence has a similar purpose, in that it is used to synchronize execution, but it is for ordering 
+		// the execution on the CPU, otherwise known as the host.Simply put, if the host needs to know when the 
+		// GPU has finished something, we use a fence.
+		// 
+		// Similar to semaphores, fences are either in a signaled or unsignaled state. Whenever we submit work 
+		// to execute, we can attach a fence to that work.When the work is finished, the fence will be 
+		// signaled.Then we can make the host wait for the fence to be signaled, guaranteeing that the work has 
+		// finished before the host continues.
+
+		vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+
+		vkResetFences(device, 1, &inFlightFence);
+
+		// Grab the image we can draw on via the returned imageIndex.
+		uint32_t imageIndex;
+		// Swap chain is an extension feature so KHR suffix is used.
+		vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+		
+		// Record the command buffer.
+		vkResetCommandBuffer(commandBuffer, 0);
+		recordCommandBuffer(commandBuffer, imageIndex);
+
+		// Submit the command buffer.
+		VkSubmitInfo submitInfo{};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+		// Semaphore is signaled in GPU pipeline at color attachment stage.
+		VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.pWaitSemaphores = waitSemaphores;
+		submitInfo.pWaitDstStageMask = waitStages;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;  // Submit the one command buffer we created.
+
+		// signalSemaphoreCount and pSignalSemaphores choose the semaphores to signal when the command
+		// buffer completes.
+		VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = signalSemaphores;
+
+		if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
+			throw std::runtime_error("failed to submit draw command buffer!");
+		}
+
+		// Presentation
+		// ------------
+	    // The last step of drawing a frame is submitting the result back to the swap chain to have it eventually 
+		// show up on the screen. Presentation is configured through a VkPresentInfoKHR structure at the end of the 
+		// drawFrame function.
+
+		VkPresentInfoKHR presentInfo{};
+		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+		presentInfo.waitSemaphoreCount = 1;
+		presentInfo.pWaitSemaphores = signalSemaphores;
+
+		VkSwapchainKHR swapChains[] = { swapChain };
+		presentInfo.swapchainCount = 1;
+		presentInfo.pSwapchains = swapChains;
+		presentInfo.pImageIndices = &imageIndex;
+		presentInfo.pResults = nullptr; // Optional
+
+		// Submit request to present the image (finally!).
+		// The vkQueuePresentKHR function submits the request to present an image to the swap chain. We'll add 
+		// error handling for both vkAcquireNextImageKHR and vkQueuePresentKHR in the next chapter, because their 
+		// failure does not necessarily mean that the program should terminate, unlike the functions we've seen so 
+		// far.
+		vkQueuePresentKHR(presentQueue, &presentInfo);
+
 	}
 
 	void cleanup() {
+		vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
+		vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
+		vkDestroyFence(device, inFlightFence, nullptr);
+
 		vkDestroyCommandPool(device, commandPool, nullptr);
 
 		// Destroy framebuffers.

@@ -135,7 +135,9 @@ class HelloTriangleApplication {
 public:
 	void run() {
 		initWindow();
+		std::cerr << "initWindow() done" << std::endl;
 		initVulkan();
+		std::cerr << "initVulkan() done" << std::endl;
 		mainLoop();
 		cleanup();
 	}
@@ -164,6 +166,10 @@ private:
 	VkPipelineLayout pipelineLayout{};
 	std::vector<VkFramebuffer> swapChainFramebuffers;  // Attachments created during render pass are bound to VkFramebuffer.  One VkFramebuffer
 	// must exist per image in swap chain.  Hence a vector is used to track each one.
+	VkCommandPool commandPool{}; // Commands are constructed on CPU side and sent as a complete set.  This allows GPU to optimize since it is 
+	// directed with the complete sequence of commands.  Several may be used especially in a threaded environment.
+	VkCommandBuffer commandBuffer{}; // Actual single buffer use to issue commands.  Added to commandPool.
+	VkPipeline graphicsPipeline{}; // Full-blown pipeline is here.
 
 	void initWindow() {
 		glfwInit();
@@ -173,6 +179,7 @@ private:
 
 		window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);  // 4th parameter picks monitor... interesting
 	}
+
 	void initVulkan() {
 		createInstance();
 		setupDebugMessenger();   // Call to setup debug callbacks.
@@ -184,6 +191,81 @@ private:
 		createRenderPass();
 		createGraphicsPipeline();
 		createFrameBuffers();
+		createCommandPool();
+		createCommandBuffer();  // Allocate the command buffer.
+	}
+
+	// This will be called to write commands to the commandBuffer.
+	void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = 0; // Optional
+		//The flags parameter specifies how we're going to use the command buffer. The following values are available:
+		// -- VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: The command buffer will be rerecorded right after executing it once.
+		// -- VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT : This is a secondary command buffer that will be entirely within a single render pass.
+		// -- VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT : The command buffer can be resubmitted while it is also already pending execution.
+		beginInfo.pInheritanceInfo = nullptr; // Optional
+
+		if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+			throw std::runtime_error("failed to begin recording command buffer!");
+		}
+
+		// Start the render pass.
+		VkRenderPassBeginInfo renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		renderPassInfo.renderPass = renderPass;
+		renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+		renderPassInfo.renderArea.offset = { 0, 0 };  // Define area with one corner...
+		renderPassInfo.renderArea.extent = swapChainExtent;  // and the other corner.  Should match attachment size for best performance.
+
+		VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };  // Black with 100% opacity.
+		renderPassInfo.clearValueCount = 1;
+		renderPassInfo.pClearValues = &clearColor; // Clear colors for VK_ATTACHMENT_LOAD_OP_CLEAR.
+
+		vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+		// vkCmd prefix are all record commands.  All return void with errors only when finished recording.
+		// The final parameter controls how the drawing commands within the render pass will be provided. It can have one of two values:
+		// -- VK_SUBPASS_CONTENTS_INLINE: The render pass commands will be embedded in the primary command buffer itself and no secondary command 
+		//    buffers will be executed.
+		// -- VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : The render pass commands will be executed from secondary command buffers.
+
+		// Bind to the graphics pipeline.
+		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+
+	}
+
+	void createCommandBuffer() {
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = commandPool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		// The level parameter specifies if the allocated command buffers are primary or secondary command buffers.
+		// -- VK_COMMAND_BUFFER_LEVEL_PRIMARY: Can be submitted to a queue for execution, but cannot be called from other command buffers.
+		// -- VK_COMMAND_BUFFER_LEVEL_SECONDARY : Cannot be submitted directly, but can be called from primary command buffers.
+		allocInfo.commandBufferCount = 1;
+
+		if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+			throw std::runtime_error("failed to allocate command buffers!");
+		}
+	}
+
+	void createCommandPool() {
+		QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
+
+		VkCommandPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		// There are two possible flags for command pools :
+		// -- VK_COMMAND_POOL_CREATE_TRANSIENT_BIT: Hint that command buffers are rerecorded with new commands 
+		//    very often(may change memory allocation behavior)
+		// -- VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT : Allow command buffers to be rerecorded individually, 
+		//    without this flag they all have to be reset together
+		poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
+
+		if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create command pool!");
+		}
+
 	}
 
 	void createFrameBuffers() {
@@ -268,10 +350,6 @@ private:
 			throw std::runtime_error("failed to create render pass!");
 		}
 
-
-
-
-
 	}
 
 	void createGraphicsPipeline() {
@@ -305,6 +383,23 @@ private:
 		// Store these for future reference.
 
 		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+		// Dynamic state
+		// While most of the pipeline state needs to be baked into the pipeline state, a limited amount 
+		// of the state can actually be changed without recreating the pipeline at draw time.  Examples 
+		// are the size of the viewport, line width and blend constants.  If you want to use dynamic 
+		// state and keep these properties out, then you'll have to fill in a 
+		// VkPipelineDynamicStateCreateInfo structure like this:
+
+		std::vector<VkDynamicState> dynamicStates = {
+			VK_DYNAMIC_STATE_VIEWPORT,
+			VK_DYNAMIC_STATE_SCISSOR
+		};
+
+		VkPipelineDynamicStateCreateInfo dynamicState{};
+		dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+		dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+		dynamicState.pDynamicStates = dynamicStates.data();
 
 		// Vertex Input Fixed Stage
 
@@ -388,9 +483,9 @@ private:
 		VkPipelineViewportStateCreateInfo viewportState{};
 		viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 		viewportState.viewportCount = 1;
-		viewportState.pViewports = &viewport;
+		viewportState.pViewports = &viewport;  // Without dynamic state these should be specified here.
 		viewportState.scissorCount = 1;
-		viewportState.pScissors = &scissor;
+		viewportState.pScissors = &scissor; // Without dynamic state these should be specified here.
 
 		// Rasterizer
 
@@ -451,6 +546,28 @@ private:
 		colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; // Optional
 		colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD; // Optional
 
+		// For an alpha blend attachment use this instead:
+		// colorBlendAttachment.blendEnable = VK_TRUE;
+		// colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+		// colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		// colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+		// colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+		// colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+		// colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+		// Reference array of structures for all framebuffers.  Provides values for the constants used by the attachment.
+		VkPipelineColorBlendStateCreateInfo colorBlending{};
+		colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+		colorBlending.logicOpEnable = VK_FALSE; // To use second method that's commented above, uncomment and change this to VK_TRUE.
+		colorBlending.logicOp = VK_LOGIC_OP_COPY; // Optional
+		colorBlending.attachmentCount = 1;
+		colorBlending.pAttachments = &colorBlendAttachment;
+		colorBlending.blendConstants[0] = 0.0f; // Optional
+		colorBlending.blendConstants[1] = 0.0f; // Optional
+		colorBlending.blendConstants[2] = 0.0f; // Optional
+		colorBlending.blendConstants[3] = 0.0f; // Optional
+ 
+
 		// Need to create default empty pipeline layout even if using nothing.
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -463,12 +580,60 @@ private:
 			throw std::runtime_error("failed to create pipeline layout!");
 		}
 
+		// We can now combine all of the structures and objects from the previous chapters to create the graphics pipeline!
+		// Here's the types of objects we have now, as a quick recap:
+		//
+		//	Shader stages : the shader modules that define the functionality of the programmable stages of the graphics pipeline
+		//	Fixed - function state : all of the structures that define the fixed - function stages of the pipeline, 
+		//  like input assembly, rasterizer, viewport and color blending
+		//	Pipeline layout : the uniform and push values referenced by the shader that can be updated at draw time
+		//	Render pass : the attachments referenced by the pipeline stages and their usage
+
+		// We start by referencing the array of VkPipelineShaderStageCreateInfo structs.
+
+		VkGraphicsPipelineCreateInfo pipelineInfo{};
+		pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		pipelineInfo.stageCount = 2;
+		pipelineInfo.pStages = shaderStages;
+
+		// Then we reference all of the structures describing the fixed-function stage.
+
+		pipelineInfo.pVertexInputState = &vertexInputInfo;
+		pipelineInfo.pInputAssemblyState = &inputAssembly;
+		pipelineInfo.pViewportState = &viewportState;
+		pipelineInfo.pRasterizationState = &rasterizer;
+		pipelineInfo.pMultisampleState = &multisampling;
+		pipelineInfo.pDepthStencilState = nullptr; // Optional
+		pipelineInfo.pColorBlendState = &colorBlending;
+		pipelineInfo.pDynamicState = &dynamicState;
+
+		// After that comes the pipeline layout, which is a Vulkan handle rather than a struct pointer.
+
+		pipelineInfo.layout = pipelineLayout;
+
+		// And finally we have the reference to the render pass and the index of the sub pass where this graphics pipeline will 
+		// be used.It is also possible to use other render passes with this pipeline instead of this specific instance, but they 
+		// have to be compatible with renderPass.The requirements for compatibility are described here, but we won't be using 
+		// that feature in this tutorial.
+
+		pipelineInfo.renderPass = renderPass;
+		pipelineInfo.subpass = 0;
+
+		pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
+		pipelineInfo.basePipelineIndex = -1; // Optional
+
+		// Create the pipeline..... finally!
+		if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create graphics pipeline!");
+		}
+
 		// Compilation and linking of GPU machine code  until graphics pipeline is
 		// created.  Since we already created it, the modules are no longer needed
 		// and can be destroyed.
 
 		vkDestroyShaderModule(device, fragShaderModule, nullptr);
 		vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
 	}
 
 	// Wrap byte-code into a shader module to be used in the pipeline.
@@ -1072,13 +1237,18 @@ private:
 	}
 
 	void cleanup() {
+		vkDestroyCommandPool(device, commandPool, nullptr);
+
 		// Destroy framebuffers.
 		for (auto framebuffer : swapChainFramebuffers) {
 			vkDestroyFramebuffer(device, framebuffer, nullptr);
 		}
 
-		// Destroy the pipeline layout.
+
+		// Destroy the pipeline.
+		vkDestroyPipeline(device, graphicsPipeline, nullptr);
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+
 		vkDestroyRenderPass(device, renderPass, nullptr);
 
 		// Clean up the image views that were created for us.
